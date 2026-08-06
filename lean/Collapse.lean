@@ -25,13 +25,23 @@
   satisfies and that is nonetheless false of some admissible outcome, so testing outcomes
   and testing systems come apart.
 
-  PRIOR ART, recorded before any claim is made. Nothing here is deep, and the ingredients
-  are old: Popper's content measure is `1 - p(P)`, which is the specification-strength
-  quantity in `Vacuity.lean` under another name; vacuity detection is Beer, Ben-David,
-  Eisner and Rodeh (CAV 1997); the coverage dual is Kupferman and Vardi (CONCUR 2006). The
-  statement below is a surjectivity condition on an evaluation map, which is the kind of
-  thing that is folklore somewhere. It is recorded here because it is CHECKED, and because
-  it names a boundary that a tool built on the collapse has to respect.
+  PRIOR ART. Recon was run before making any claim, and this has a precise home: it is an
+  instance of MARIE-CLAUDE GAUDEL'S TESTABILITY-HYPOTHESIS FRAMEWORK ("Testing can be
+  formal, too", TAPSOFT 1995; "Testing from Formal Specifications, a Generic Approach",
+  2001). Gaudel derives an EXHAUSTIVE TEST SET from a specification's semantics and shows
+  that, under minimal hypotheses on the program under test, success of that set is
+  equivalent to satisfaction of the specification. The condition below is one such
+  hypothesis, named explicitly and proved NECESSARY as well as sufficient, for one
+  specific substitution: outcomes in place of systems.
+
+  The other ingredients are older still. Popper's content measure is `1 - p(P)`, which is
+  the specification-strength quantity in `Vacuity.lean` under an earlier name. Vacuity
+  detection is Beer, Ben-David, Eisner and Rodeh (CAV 1997), and the coverage dual is
+  Kupferman and Vardi (CONCUR 2006).
+
+  NOTHING HERE IS CLAIMED AS NEW. It is recorded because it is CHECKED, and because it
+  names a boundary a tool built on the collapse has to respect. Finding out which
+  hypothesis your shortcut depends on is worth more than the shortcut.
 -/
 
 namespace Collapse
