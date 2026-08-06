@@ -111,6 +111,21 @@ Hand-written `impl kani::Arbitrary for T` blocks are detected, so your domain ty
 - **Macro-generated functions are invisible**, because `syn` sees a `macro_rules!` body as
   opaque tokens.
 
+## Two kinds of vacuity, and this is the second one
+
+Vacuity comes in two flavours and they need different tools.
+
+**Preconditions.** An unsatisfiable `assume` means nothing reaches the assertion, so the
+property holds over an empty input set. Kani already ships the detector for this:
+`kani::cover`. A separate [minimal reproduction](https://github.com/KyleClouthier/kani-vacuity-demo)
+shows four of five harness styles reporting `SUCCESSFUL` on knowingly broken code for
+exactly this reason.
+
+**Postconditions**, which is what this tool is for. The code runs, every input reaches the
+assertion, the proof is sound and the verdict is correct. The clause itself has no content.
+**Reachability analysis cannot detect this, because nothing is unreachable.** `kani::cover`
+sees a completely healthy harness, because the harness *is* healthy.
+
 ## Prior art
 
 Vacuity detection is not new and this does not claim to be. Beer, Ben-David, Eisner and
