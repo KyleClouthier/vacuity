@@ -103,6 +103,31 @@ reported as **unknown**, never as passing, and exits 2.
 
 Hand-written `impl kani::Arbitrary for T` blocks are detected, so your domain types count.
 
+## The assumption this rests on
+
+A probe replaces the result with `kani::any::<ReturnType>()`. That substitution is only
+legitimate if **`kani::any` can produce every value the function could actually return**.
+
+The two ways that can fail are not symmetric, and the asymmetry is the reason this is
+usable at all:
+
+| if `Arbitrary` produces | effect | direction |
+|---|---|---|
+| more values than the function can return | the clause is tested against unreachable values, fails more often | **under-reports**: misses vacuous clauses, invents nothing |
+| fewer values than the function can return | a reachable counterexample is never generated | **over-reports**: calls a clause vacuous when it is not |
+
+Only the second is dangerous, because a false claim about someone's contract costs more
+than every true one it might find. So: **a hand-written `impl kani::Arbitrary` that does
+not cover its type can make this tool wrong.** Derived instances and the standard ones are
+fine. If you wrote a narrow one, this will trust it.
+
+The general condition is proved in [`lean/Collapse.lean`](lean/Collapse.lean): substituting
+outcomes for systems is valid for every claim exactly when the generator class is
+*pointwise surjective* onto the admissible set, meaning every admissible value is
+producible at every input. Constants give that for free, which is why it works for ordinary
+per-call postconditions. It stops working when some admissible outcome is unreachable, and
+the same file constructs the claim that separates the two checks when it does.
+
 ## Limits
 
 - **Vacuous is not the same as weak.** `Alignment::as_usize` probes as having content, and
