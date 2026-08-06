@@ -1,0 +1,8 @@
+[package]
+name = "vacuity-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Self-contained demonstration that one query decides postcondition vacuity."
+
+[dependencies]

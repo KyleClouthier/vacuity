@@ -1,0 +1,18 @@
+[package]
+name = "vacuity"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Finds postconditions that prove nothing: generates a Kani harness per clause that decides vacuity in one query."
+readme = "README.md"
+keywords = ["verification", "kani", "contracts", "formal-methods", "vacuity"]
+categories = ["development-tools"]
+
+[dependencies]
+# Everything vendors, and there is deliberately no HTTP client, no database and no
+# telemetry. This reads source files and prints Rust.
+syn = { version = "2", features = ["full", "extra-traits", "parsing", "visit", "printing", "clone-impls"], default-features = false }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+
+[profile.release]
+opt-level = 2
