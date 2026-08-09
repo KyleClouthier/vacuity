@@ -73,6 +73,11 @@ pub struct ProbeReport {
 const PRIMITIVE: &[&str] = &[
     "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
     "bool", "char", "NonZero", "Option", "Alignment",
+    // Kani also derives Arbitrary for the NonZero* alias names, which head() sees
+    // as distinct idents from the generic `NonZero`. Without these, real code using
+    // `NonZeroU32`/`NonZeroUsize` (e.g. slitter) is skipped though it is probeable.
+    "NonZeroU8", "NonZeroU16", "NonZeroU32", "NonZeroU64", "NonZeroU128", "NonZeroUsize",
+    "NonZeroI8", "NonZeroI16", "NonZeroI32", "NonZeroI64", "NonZeroI128", "NonZeroIsize",
 ];
 
 fn tokens(t: impl quote_lite::ToTokensLite) -> String {
@@ -187,6 +192,10 @@ struct Ctx<'a> {
     known: &'a HashSet<String>,
     rep: &'a mut ProbeReport,
     seq: usize,
+    /// When true, probe PRECONDITIONS (are the #[requires] jointly satisfiable)
+    /// instead of postconditions. Precondition vacuity is return-type-independent
+    /// and is the `assume(false)` gap the Kani paper flags as manual review.
+    precond: bool,
 }
 
 fn ensures_clauses(attrs: &[syn::Attribute]) -> Vec<String> {
@@ -203,12 +212,136 @@ fn ensures_clauses(attrs: &[syn::Attribute]) -> Vec<String> {
         .collect()
 }
 
+/// Preconditions: `#[requires(...)]` / `#[kani::requires(...)]`. Unlike ensures,
+/// the body is a bare boolean expression, not a `|result|` closure.
+fn requires_clauses(attrs: &[syn::Attribute]) -> Vec<String> {
+    attrs
+        .iter()
+        .filter(|a| a.path().segments.last().is_some_and(|s| s.ident == "requires"))
+        .filter_map(|a| match &a.meta {
+            syn::Meta::List(l) => Some(l.tokens.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Emit one probe per contracted function that havocs the inputs, assumes every
+/// precondition, then `kani::cover!(true)`. If that cover is UNREACHABLE the
+/// preconditions are jointly unsatisfiable, so any proof under them is vacuous.
+/// Return-type-independent: it never constructs or names the result.
+fn build_precondition(
+    attrs: &[syn::Attribute],
+    sig: &syn::Signature,
+    self_ty: Option<&syn::Type>,
+    ctx: &mut Ctx,
+) {
+    let clauses = requires_clauses(attrs);
+    if clauses.is_empty() {
+        return;
+    }
+    let fname = sig.ident.to_string();
+    ctx.rep.clauses_seen += clauses.len();
+    let mut fail = |why: String, ctx: &mut Ctx| {
+        ctx.rep.skips.push(Skip { file: ctx.file.to_path_buf(), func: fname.clone(), reason: why });
+    };
+
+    if sig.generics.params.iter().any(|p| matches!(p, syn::GenericParam::Type(_))) {
+        fail("generic function, no type arguments to instantiate".into(), ctx);
+        return;
+    }
+
+    // Havoc every input; a precondition constrains the inputs, so they must be free.
+    let mut binds = Vec::new();
+    for a in &sig.inputs {
+        match a {
+            syn::FnArg::Receiver(_) => {
+                let Some(st) = self_ty else {
+                    fail("takes self but is not in an impl block".into(), ctx);
+                    return;
+                };
+                if let Err(e) = probeable(st, ctx.known) {
+                    fail(format!("self type: {e}"), ctx);
+                    return;
+                }
+                binds.push(format!("let probe_self: {} = kani::any();", tokens(st)));
+            }
+            syn::FnArg::Typed(t) => {
+                if let Err(e) = probeable(&t.ty, ctx.known) {
+                    fail(format!("parameter: {e}"), ctx);
+                    return;
+                }
+                let syn::Pat::Ident(id) = &*t.pat else {
+                    fail("parameter is a pattern, not a plain name".into(), ctx);
+                    return;
+                };
+                binds.push(format!("let {}: {} = kani::any();", id.ident, tokens(&t.ty)));
+            }
+        }
+    }
+
+    // Turn each requires clause into an assume. The predicate is the first
+    // comma-separated element (the contracts crate allows a trailing "message").
+    // A clause using the contracts `->` implication is not valid Rust, so skip it.
+    let mut assumes = Vec::new();
+    for (i, raw) in clauses.iter().enumerate() {
+        let pred = first_expr(raw);
+        if syn::parse_str::<syn::Expr>(&pred).is_err() {
+            fail(format!("clause {i} is not a bare Rust expression this tool can assume"), ctx);
+            return;
+        }
+        let pred = rename_word(&pred, "self", "probe_self");
+        assumes.push(format!("kani::assume({pred});"));
+    }
+
+    ctx.seq += 1;
+    let name = format!("probe_precond_{}_{}", fname, ctx.seq);
+    let code = format!(
+        "    /// Probes `{fname}` preconditions. An UNREACHABLE cover means they are jointly\n\
+         \x20   /// unsatisfiable, so every proof under them is VACUOUS.\n\
+         \x20   #[kani::proof]\n\
+         \x20   fn {name}() {{\n\
+         \x20       {}\n        {}\n        kani::cover!(true, \"preconditions jointly satisfiable\");\n\
+         \x20   }}\n",
+        binds.join("\n        "),
+        assumes.join("\n        "),
+    );
+    ctx.rep.probes.push(Probe {
+        file: ctx.file.to_path_buf(),
+        line: sig.ident.span().start().line,
+        func: fname.clone(),
+        name,
+        code,
+    });
+}
+
+/// The first comma-separated element of a token string, so `pred, "msg"` yields
+/// `pred`. Respects nesting so a comma inside `f(a, b)` does not split.
+fn first_expr(raw: &str) -> String {
+    let (mut depth, mut end) = (0i32, raw.len());
+    for (i, c) in raw.char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                end = i;
+                break;
+            }
+            _ => {}
+        }
+    }
+    raw[..end].trim().to_string()
+}
+
 fn build(
     attrs: &[syn::Attribute],
     sig: &syn::Signature,
     self_ty: Option<&syn::Type>,
     ctx: &mut Ctx,
 ) {
+    if ctx.precond {
+        build_precondition(attrs, sig, self_ty, ctx);
+        return;
+    }
     let clauses = ensures_clauses(attrs);
     if clauses.is_empty() {
         return;
@@ -373,7 +506,19 @@ fn rust_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Probe postconditions (`#[ensures]`): does a clause hold for every value its
+/// return type admits, proving nothing.
 pub fn generate(root: &Path) -> ProbeReport {
+    generate_impl(root, false)
+}
+
+/// Probe preconditions (`#[requires]`): are the assumptions jointly satisfiable,
+/// or is every proof under them vacuous. Return-type-independent.
+pub fn generate_preconditions(root: &Path) -> ProbeReport {
+    generate_impl(root, true)
+}
+
+fn generate_impl(root: &Path, precond: bool) -> ProbeReport {
     let mut rep = ProbeReport::default();
     let mut known = HashSet::new();
     let files = rust_files(root);
@@ -395,7 +540,7 @@ pub fn generate(root: &Path) -> ProbeReport {
     for p in &files {
         let Ok(src) = std::fs::read_to_string(p) else { continue };
         let Ok(f) = syn::parse_file(&src) else { continue };
-        let mut ctx = Ctx { file: p, known: &known, rep: &mut rep, seq };
+        let mut ctx = Ctx { file: p, known: &known, rep: &mut rep, seq, precond };
         walk(&f.items, None, &mut ctx);
         seq = ctx.seq;
     }
@@ -567,6 +712,54 @@ mod tests {
         assert!(c.contains("let a: u32 = kani::any();"), "{c}");
         assert!(c.contains("let b: u8 = kani::any();"), "{c}");
     }
+
+    fn gen_pre(src: &str) -> ProbeReport {
+        let dir = std::env::temp_dir().join(format!("vac_pre_{}", src.len()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("t.rs"), src).unwrap();
+        let r = generate_preconditions(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        r
+    }
+
+    /// A precondition probe havocs the inputs, assumes every #[requires], and covers.
+    /// It never binds or constructs the result: preconditions are return-type-independent.
+    #[test]
+    fn preconditions_produce_a_cover_probe_ignoring_the_return_type() {
+        let r = gen_pre(r#"
+            #[kani::requires(x > 10)]
+            #[kani::requires(x < 5)]
+            fn contradictory(x: u32) -> u32 { x }
+        "#);
+        assert_eq!(r.probes.len(), 1);
+        let c = &r.probes[0].code;
+        assert!(c.contains("let x: u32 = kani::any();"), "{c}");
+        assert!(c.contains("kani::assume(x > 10)"), "{c}");
+        assert!(c.contains("kani::assume(x < 5)"), "{c}");
+        assert!(c.contains("kani::cover!(true"), "{c}");
+        assert!(!c.contains("probe_result"), "precondition probe must not construct a result: {c}");
+    }
+
+    /// For a precondition probe both a satisfiable and an unsatisfiable assume set print
+    /// VERIFICATION:- SUCCESSFUL; only the cover status tells them apart. UNREACHABLE means
+    /// the preconditions are vacuous.
+    #[test]
+    fn precondition_vacuity_is_read_from_cover_status_not_the_verdict() {
+        let rep = ProbeReport {
+            probes: vec![
+                Probe { file: "t.rs".into(), line: 1, func: "bad".into(), name: "probe_precond_bad_1".into(), code: String::new() },
+                Probe { file: "t.rs".into(), line: 2, func: "ok".into(), name: "probe_precond_ok_2".into(), code: String::new() },
+            ],
+            ..Default::default()
+        };
+        let out = "Checking harness probe_precond_bad_1...\n\
+                   Status: UNREACHABLE\nVERIFICATION:- SUCCESSFUL\n\
+                   Checking harness probe_precond_ok_2...\n\
+                   Status: SATISFIED\nVERIFICATION:- SUCCESSFUL\n";
+        let r = interpret(&rep, out);
+        assert_eq!(r[0].1, Some(true), "UNREACHABLE cover = vacuous preconditions");
+        assert_eq!(r[1].1, Some(false), "SATISFIED cover = healthy preconditions");
+    }
 }
 
 /// Map Kani's output back onto the clauses that produced it.
@@ -584,18 +777,33 @@ pub fn interpret<'a>(rep: &'a ProbeReport, kani_output: &str) -> Vec<(&'a Probe,
     for p in &rep.probes {
         let mut verdict = None;
         let mut idx = 0;
+        let is_precond = p.name.starts_with("probe_precond_");
         while let Some(rel) = kani_output[idx..].find(&p.name) {
             let at = idx + rel;
             let tail = &kani_output[at + p.name.len()..];
             let stop = tail.find("Checking harness").unwrap_or(tail.len());
             let window = &tail[..stop];
-            if window.contains("VERIFICATION:- SUCCESSFUL") {
-                verdict = Some(true);
-                break;
-            }
-            if window.contains("VERIFICATION:- FAILED") {
-                verdict = Some(false);
-                break;
+            if is_precond {
+                // A precondition probe ALWAYS reports VERIFICATION:- SUCCESSFUL (an
+                // unsatisfiable assume set is the paper's vacuous pass). The real signal
+                // is the cover status: UNREACHABLE => preconditions unsatisfiable => vacuous.
+                if window.contains("UNREACHABLE") || window.contains("unreachable") {
+                    verdict = Some(true);
+                    break;
+                }
+                if window.contains("SATISFIED") || window.contains("satisfied") {
+                    verdict = Some(false);
+                    break;
+                }
+            } else {
+                if window.contains("VERIFICATION:- SUCCESSFUL") {
+                    verdict = Some(true);
+                    break;
+                }
+                if window.contains("VERIFICATION:- FAILED") {
+                    verdict = Some(false);
+                    break;
+                }
             }
             idx = at + p.name.len();
         }
@@ -610,14 +818,23 @@ pub fn interpret<'a>(rep: &'a ProbeReport, kani_output: &str) -> Vec<(&'a Probe,
 /// Rust standard library requires on every new item but which does NOT compile
 /// in an ordinary crate. Default (false) omits it so the probes build in any
 /// crate; pass `--std` when pasting into verify-rust-std.
-pub fn render_module(rep: &ProbeReport, std_mode: bool) -> String {
+pub fn render_module(rep: &ProbeReport, std_mode: bool, precond: bool) -> String {
     let mut s = String::new();
-    s.push_str(
-        "// GENERATED VACUITY PROBES. Each havocs the inputs and the result and asserts one\n\
-         // postcondition. VERIFICATION SUCCESS MEANS THE CLAUSE IS VACUOUS: it holds for every\n\
-         // value the return type admits, so every implementation satisfies it and proving it\n\
-         // establishes nothing. Failure is the healthy outcome.\n",
-    );
+    if precond {
+        s.push_str(
+            "// GENERATED PRECONDITION PROBES. Each havocs the inputs, assumes every\n\
+             // #[requires] clause, then covers reachability. AN UNREACHABLE COVER MEANS THE\n\
+             // PRECONDITIONS ARE JOINTLY UNSATISFIABLE, so no input reaches the body and every\n\
+             // proof under them is vacuous. A SATISFIED cover is the healthy outcome.\n",
+        );
+    } else {
+        s.push_str(
+            "// GENERATED VACUITY PROBES. Each havocs the inputs and the result and asserts one\n\
+             // postcondition. VERIFICATION SUCCESS MEANS THE CLAUSE IS VACUOUS: it holds for every\n\
+             // value the return type admits, so every implementation satisfies it and proving it\n\
+             // establishes nothing. Failure is the healthy outcome.\n",
+        );
+    }
     s.push_str("#[cfg(kani)]\n");
     if std_mode {
         s.push_str("#[unstable(feature = \"kani\", issue = \"none\")]\n");

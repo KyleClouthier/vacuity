@@ -27,6 +27,9 @@ USAGE:
     vacuity <path> --results FILE    read Kani's output, say which clauses are vacuous
     vacuity <path> --out FILE --std  add the #[unstable] attr the standard library
                                      requires (omit for an ordinary crate)
+    vacuity <path> --preconditions   probe #[requires] instead of #[ensures]:
+                                     a cover that comes back UNREACHABLE means the
+                                     preconditions are unsatisfiable (vacuous)
 
 WORKFLOW:
     vacuity ./src --out probes.rs
@@ -57,9 +60,15 @@ fn main() {
         .cloned()
         .unwrap_or_else(|| ".".into());
 
-    let rep = vacuity::probe::generate(Path::new(&path));
+    let preconditions = args.iter().any(|a| a == "--preconditions");
+    let rep = if preconditions {
+        vacuity::probe::generate_preconditions(Path::new(&path))
+    } else {
+        vacuity::probe::generate(Path::new(&path))
+    };
 
-    eprintln!("  postconditions found : {}", rep.clauses_seen);
+    eprintln!("  {} found : {}",
+        if preconditions { "precondition clauses" } else { "postconditions" }, rep.clauses_seen);
     eprintln!("  probes generated     : {}", rep.probes.len());
     eprintln!("  skipped              : {}", rep.skips.len());
     if !rep.arbitrary_types.is_empty() {
@@ -92,9 +101,15 @@ fn main() {
         let missing: Vec<_> = mapped.iter().filter(|(_, v)| v.is_none()).collect();
 
         if !vacuous.is_empty() {
-            println!("\n  {} clauses are PROVEN VACUOUS.", vacuous.len());
-            println!("  Each holds for every value its return type admits, so every");
-            println!("  implementation satisfies it and proving it establishes nothing.\n");
+            if preconditions {
+                println!("\n  {} functions have VACUOUS PRECONDITIONS.", vacuous.len());
+                println!("  Their #[requires] clauses are jointly unsatisfiable, so no input");
+                println!("  reaches the body and every proof under them checks nothing.\n");
+            } else {
+                println!("\n  {} clauses are PROVEN VACUOUS.", vacuous.len());
+                println!("  Each holds for every value its return type admits, so every");
+                println!("  implementation satisfies it and proving it establishes nothing.\n");
+            }
             for (p, _) in &vacuous {
                 println!("    {}:{}  {}", p.file.display(), p.line, p.func);
             }
@@ -113,7 +128,7 @@ fn main() {
     }
 
     let std_mode = args.iter().any(|a| a == "--std");
-    let module = vacuity::probe::render_module(&rep, std_mode);
+    let module = vacuity::probe::render_module(&rep, std_mode, preconditions);
     match flag("--out") {
         Some(f) => {
             if let Err(e) = std::fs::write(&f, &module) {
