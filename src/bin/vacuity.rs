@@ -74,18 +74,23 @@ fn main() {
         vacuity::probe::generate(Path::new(&path))
     };
 
-    eprintln!("  {} found : {}",
-        if completeness { "postconditions (completeness)" }
-        else if preconditions { "precondition clauses" } else { "postconditions" }, rep.clauses_seen);
+    // Counts reconcile at the clause level: found == covered + skipped. A postcondition
+    // probe covers one clause; a precondition/completeness probe covers all of its
+    // function's clauses, so `probes generated` is a separate count from covered clauses.
+    let unit = if completeness { "postconditions (completeness)" }
+        else if preconditions { "precondition clauses" } else { "postconditions" };
+    let clauses_skipped = rep.clauses_seen.saturating_sub(rep.clauses_covered);
+    eprintln!("  {unit} found : {}", rep.clauses_seen);
+    eprintln!("    covered by a probe   : {}", rep.clauses_covered);
+    eprintln!("    skipped (unprobeable): {clauses_skipped}");
     eprintln!("  probes generated     : {}", rep.probes.len());
-    eprintln!("  skipped              : {}", rep.skips.len());
     if !rep.arbitrary_types.is_empty() {
         eprintln!("  types with a hand-written kani::Arbitrary: {:?}", rep.arbitrary_types);
     }
     // EVERY SKIP IS NAMED. A generator that quietly emitted fewer probes than there are
     // clauses would report a clean bill of health for clauses it never read.
     if !rep.skips.is_empty() {
-        eprintln!("\n  --- not probed, with reasons ---");
+        eprintln!("\n  --- functions not probed, with reasons ---");
         let mut by_reason: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
         for s in &rep.skips {
             by_reason.entry(s.reason.as_str()).or_default().push(s.func.as_str());

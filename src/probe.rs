@@ -62,6 +62,11 @@ pub struct Skip {
 #[derive(Debug, Default)]
 pub struct ProbeReport {
     pub clauses_seen: usize,
+    /// Clauses that ended up inside a generated probe. `clauses_seen` always equals
+    /// `clauses_covered` plus the clauses accounted for in `skips`, so the summary
+    /// reconciles (a postcondition probe covers one clause; a precondition or
+    /// completeness probe covers all of its function's clauses at once).
+    pub clauses_covered: usize,
     pub probes: Vec<Probe>,
     pub skips: Vec<Skip>,
     /// Types found carrying a hand-written `impl kani::Arbitrary`, which makes them
@@ -317,6 +322,8 @@ fn build_precondition(
         name,
         code,
     });
+    // One probe covers all of this function's requires clauses at once.
+    ctx.rep.clauses_covered += clauses.len();
 }
 
 /// The first comma-separated element of a token string, so `pred, "msg"` yields
@@ -454,6 +461,8 @@ fn build(
             name,
             code,
         });
+        // One postcondition probe per clause.
+        ctx.rep.clauses_covered += 1;
     }
 }
 
@@ -581,6 +590,8 @@ fn build_completeness(
         name,
     code,
     });
+    // One completeness probe covers all of this function's ensures clauses at once.
+    ctx.rep.clauses_covered += clauses.len();
 }
 
 fn strip_type(p: &syn::Pat) -> syn::Pat {

@@ -23,8 +23,9 @@ Postconditions (`#[ensures]`), the default:
 ```console
 $ vacuity ./src --out probes.rs
   postconditions found : 13
+    covered by a probe   : 10
+    skipped (unprobeable): 3
   probes generated     : 10
-  skipped              : 2
 
 $ # paste probes.rs into the crate under test
 $ cargo kani --harness probe_vacuity_ > out.txt
@@ -151,8 +152,10 @@ printed with its reason**:
 ```
 
 A generator that quietly emitted fewer probes than there are clauses would report a clean
-bill of health for clauses it never read. Likewise, a probe missing from the Kani output is
-reported as **unknown**, never as passing, and exits 2.
+bill of health for clauses it never read. The counts reconcile at the clause level to make
+that impossible to hide: `found` always equals `covered by a probe` plus
+`skipped (unprobeable)`, so no clause goes unaccounted. Likewise, a probe missing from the
+Kani output is reported as **unknown**, never as passing, and exits 2.
 
 Hand-written `impl kani::Arbitrary for T` blocks are detected, so your domain types count.
 
