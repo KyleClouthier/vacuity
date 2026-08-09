@@ -18,6 +18,8 @@ the harness is healthy, the verdict is correct. The clause is the problem.
 
 ## Use
 
+Postconditions (`#[ensures]`), the default:
+
 ```console
 $ vacuity ./src --out probes.rs
   postconditions found : 13
@@ -38,7 +40,36 @@ $ vacuity ./src --results out.txt
 **Verification success is the bug report.** Failure is the healthy outcome: it produces a
 type-valid value your clause rejects, proving the clause constrains something.
 
-Exit 1 when anything is vacuous, so this works as a CI gate on new contracts.
+Preconditions (`#[requires]`), with `--preconditions`:
+
+```console
+$ vacuity ./src --preconditions --out probes.rs
+$ cargo kani --harness probe_precond_ > out.txt
+$ vacuity ./src --preconditions --results out.txt
+  1 functions have VACUOUS PRECONDITIONS.
+  Their #[requires] clauses are jointly unsatisfiable, so no input
+  reaches the body and every proof under them checks nothing.
+
+    src/alloc.rs:42  allocate
+```
+
+Here an **unreachable cover** is the bug report: it means no input satisfies the
+assumptions. This half is return-type-independent, so it reaches functions the
+postcondition probes skip. See [Both kinds of vacuity](#both-kinds-of-vacuity).
+
+Either mode exits 1 when anything is vacuous, so both work as a CI gate on new contracts.
+
+Both `#[ensures]` / `#[requires]` and the fully-qualified `#[kani::ensures]` /
+`#[kani::requires]` spellings are recognised.
+
+### Flags
+
+| flag | effect |
+|---|---|
+| `--out FILE` | write the generated probe module to `FILE` |
+| `--results FILE` | read Kani's output and report which clauses are vacuous |
+| `--preconditions` | probe `#[requires]` instead of `#[ensures]` |
+| `--std` | add the `#[unstable(feature = "kani")]` attr the standard library requires (omit for an ordinary crate) |
 
 ## Install
 
@@ -136,20 +167,28 @@ the same file constructs the claim that separates the two checks when it does.
 - **Macro-generated functions are invisible**, because `syn` sees a `macro_rules!` body as
   opaque tokens.
 
-## Two kinds of vacuity, and this is the second one
+## Both kinds of vacuity
 
-Vacuity comes in two flavours and they need different tools.
+Vacuity comes in two flavours and they need different checks. This tool does both.
 
-**Preconditions.** An unsatisfiable `assume` means nothing reaches the assertion, so the
-property holds over an empty input set. Kani already ships the detector for this:
-`kani::cover`. A separate [minimal reproduction](https://github.com/KyleClouthier/kani-vacuity-demo)
+**Preconditions** (`--preconditions`). An unsatisfiable `assume` means nothing reaches the
+assertion, so the property holds over an empty input set. The detector is reachability:
+Kani ships `kani::cover` for it. What this adds is the automation around it, one cover probe
+per contracted function, havocking the inputs and assuming every `#[requires]` clause, then
+reading the cover status back per clause and exiting non-zero for CI. An **UNREACHABLE**
+cover is the vacuous case. Note that an unsatisfiable assume set still prints
+`VERIFICATION:- SUCCESSFUL`, character for character identical to a real proof, which is
+why the signal has to be read from the cover status and why a reviewer scanning verdicts
+misses it. A separate [minimal reproduction](https://github.com/KyleClouthier/kani-vacuity-demo)
 shows four of five harness styles reporting `SUCCESSFUL` on knowingly broken code for
 exactly this reason.
 
-**Postconditions**, which is what this tool is for. The code runs, every input reaches the
-assertion, the proof is sound and the verdict is correct. The clause itself has no content.
+**Postconditions** (the default). The code runs, every input reaches the assertion, the
+proof is sound and the verdict is correct. The clause itself has no content.
 **Reachability analysis cannot detect this, because nothing is unreachable.** `kani::cover`
-sees a completely healthy harness, because the harness *is* healthy.
+sees a completely healthy harness, because the harness *is* healthy. This is the half that
+needs the return-value havoc and the [`havoc_decides_vacuity`](lean/Vacuity.lean) theorem
+above.
 
 ## Prior art
 
