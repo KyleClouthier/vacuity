@@ -188,7 +188,10 @@ struct Ctx<'a> {
 fn ensures_clauses(attrs: &[syn::Attribute]) -> Vec<String> {
     attrs
         .iter()
-        .filter(|a| a.path().is_ident("ensures"))
+        // Match both the bare `#[ensures(...)]` (verify-rust-std re-export) and
+        // the fully-qualified `#[kani::ensures(...)]` (Kani's own contract form)
+        // by keying on the path's final segment rather than the whole path.
+        .filter(|a| a.path().segments.last().is_some_and(|s| s.ident == "ensures"))
         .filter_map(|a| match &a.meta {
             syn::Meta::List(l) => Some(l.tokens.to_string()),
             _ => None,
