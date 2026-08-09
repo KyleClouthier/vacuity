@@ -25,6 +25,8 @@ that could ever be written. The proof passes and establishes nothing.
 USAGE:
     vacuity <path> --out FILE        generate one probe per postcondition
     vacuity <path> --results FILE    read Kani's output, say which clauses are vacuous
+    vacuity <path> --out FILE --std  add the #[unstable] attr the standard library
+                                     requires (omit for an ordinary crate)
 
 WORKFLOW:
     vacuity ./src --out probes.rs
@@ -110,7 +112,8 @@ fn main() {
         std::process::exit(if vacuous.is_empty() { 0 } else { 1 });
     }
 
-    let module = vacuity::probe::render_module(&rep);
+    let std_mode = args.iter().any(|a| a == "--std");
+    let module = vacuity::probe::render_module(&rep, std_mode);
     match flag("--out") {
         Some(f) => {
             if let Err(e) = std::fs::write(&f, &module) {

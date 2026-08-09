@@ -6,17 +6,21 @@
 //!
 //! `Vacuity.lean` proves the check is one query:
 //!
-//!     Vacuous I P  <->  forall g, TypeValid I g -> Satisfies P g
+//! ```text
+//! Vacuous I P  <->  forall g, TypeValid I g -> Satisfies P g
+//! ```
 //!
 //! The right side quantifies over every implementation anyone could write. The left is a
 //! single assertion over an unconstrained, type-valid return value. So this emits, per
 //! clause, a harness that havocs the inputs AND the result and asserts the clause:
 //!
-//!     #[kani::proof]
-//!     fn probe_vacuity_count_ones_0() {
-//!         let result: NonZero<u32> = kani::any();
-//!         assert!(result.get() > 0);
-//!     }
+//! ```rust,ignore
+//! #[kani::proof]
+//! fn probe_vacuity_count_ones_0() {
+//!     let result: NonZero<u32> = kani::any();
+//!     assert!(result.get() > 0);
+//! }
+//! ```
 //!
 //! VERIFICATION SUCCESS IS THE BUG REPORT. Failure is healthy: it produces a type-valid
 //! value the clause rejects, proving the clause constrains something.
@@ -601,16 +605,24 @@ pub fn interpret<'a>(rep: &'a ProbeReport, kani_output: &str) -> Vec<(&'a Probe,
 }
 
 /// A module that can be pasted into the crate under test.
-pub fn render_module(rep: &ProbeReport) -> String {
+///
+/// `std_mode` adds `#[unstable(feature = "kani", issue = "none")]`, which the
+/// Rust standard library requires on every new item but which does NOT compile
+/// in an ordinary crate. Default (false) omits it so the probes build in any
+/// crate; pass `--std` when pasting into verify-rust-std.
+pub fn render_module(rep: &ProbeReport, std_mode: bool) -> String {
     let mut s = String::new();
     s.push_str(
         "// GENERATED VACUITY PROBES. Each havocs the inputs and the result and asserts one\n\
          // postcondition. VERIFICATION SUCCESS MEANS THE CLAUSE IS VACUOUS: it holds for every\n\
          // value the return type admits, so every implementation satisfies it and proving it\n\
-         // establishes nothing. Failure is the healthy outcome.\n\
-         #[cfg(kani)]\n#[unstable(feature = \"kani\", issue = \"none\")]\npub mod vacuity_probes {\n\
-         \x20   use super::*;\n\n",
+         // establishes nothing. Failure is the healthy outcome.\n",
     );
+    s.push_str("#[cfg(kani)]\n");
+    if std_mode {
+        s.push_str("#[unstable(feature = \"kani\", issue = \"none\")]\n");
+    }
+    s.push_str("pub mod vacuity_probes {\n\x20   use super::*;\n\n");
     for p in &rep.probes {
         s.push_str(&p.code);
         s.push('\n');
