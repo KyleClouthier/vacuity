@@ -57,18 +57,40 @@ Here an **unreachable cover** is the bug report: it means no input satisfies the
 assumptions. This half is return-type-independent, so it reaches functions the
 postcondition probes skip. See [Both kinds of vacuity](#both-kinds-of-vacuity).
 
-Either mode exits 1 when anything is vacuous, so both work as a CI gate on new contracts.
+Completeness (`#[ensures]` too tight?), with `--completeness`:
+
+```console
+$ vacuity ./src --completeness --out probes.rs
+$ cargo kani --harness probe_complete_ > out.txt
+$ vacuity ./src --completeness --results out.txt
+  1 contracts are LOOSE (incomplete).
+  A return value the implementation never produces still satisfies the
+  postcondition, so an output-changing implementation survives it.
+
+    src/duration/mod.rs:222  from_seconds
+```
+
+This is the dual of vacuity, and the one-query decision form of mutation adequacy: it
+calls the real function for the correct output, havocs a *different* output, and covers
+the postcondition on it. A **satisfied cover** means a wrong output passes the contract,
+so some output-changing implementation would survive it (the contract is loose); an
+**unreachable/unsatisfiable cover** means only the true output passes (the contract is
+tight). One query decides this over the entire output space, versus running many mutants.
+See [Completeness](#completeness).
+
+Every mode exits 1 when it finds a problem, so all three work as a CI gate on new contracts.
 
 Both `#[ensures]` / `#[requires]` and the fully-qualified `#[kani::ensures]` /
-`#[kani::requires]` spellings are recognised.
+`#[kani::requires]` spellings are recognised, including `#[cfg_attr(kani, kani::ensures(...))]`.
 
 ### Flags
 
 | flag | effect |
 |---|---|
 | `--out FILE` | write the generated probe module to `FILE` |
-| `--results FILE` | read Kani's output and report which clauses are vacuous |
-| `--preconditions` | probe `#[requires]` instead of `#[ensures]` |
+| `--results FILE` | read Kani's output and report the findings |
+| `--preconditions` | probe `#[requires]` (unsatisfiable assumptions) instead of `#[ensures]` |
+| `--completeness` | probe whether a postcondition is loose (accepts a wrong output) |
 | `--std` | add the `#[unstable(feature = "kani")]` attr the standard library requires (omit for an ordinary crate) |
 
 ## Install
@@ -190,17 +212,37 @@ sees a completely healthy harness, because the harness *is* healthy. This is the
 needs the return-value havoc and the [`havoc_decides_vacuity`](lean/Vacuity.lean) theorem
 above.
 
+## Completeness
+
+Vacuity asks whether a postcondition holds for *everything* (empty). Completeness asks the
+opposite end: does it hold for *too much*, does it accept an output the implementation never
+produces? A `#[ensures(|r| *r >= x)]` on a `+ 1` function is not vacuous (a random result can
+violate it), but it is loose: `x + 2` satisfies it too, so a `+ 2` bug survives the proof.
+
+`--completeness` decides this in one query per contract: call the real function for the
+correct output, havoc a *different* output, and cover the postcondition on it. Satisfiable
+means a wrong output passes (loose); unsatisfiable means only the true output passes (tight).
+This is the decision form of mutation adequacy over the whole output space rather than a
+sampled set of mutants.
+
+Honest limits: it needs the return type to be probeable by `kani::any()` and to be
+`PartialEq` (for `wrong != correct`), and it assumes a deterministic return-value contract
+(a unique correct output per input). A contract that is *intentionally* a bound will read as
+loose, which is correct: the tool reports the fact and the witness, not a judgement of intent.
+
 ## Prior art
 
-Vacuity detection is not new and this does not claim to be. Beer, Ben-David, Eisner and
-Rodeh introduced it (CAV 1997); Kupferman and Vardi established that coverage is its dual
-(CONCUR 2006); Tomb carried it into deductive verification (2025).
+Nothing here is claimed novel. Vacuity detection is Beer, Ben-David, Eisner and Rodeh (CAV
+1997); Kupferman and Vardi established coverage as its dual (CONCUR 2006); Tomb carried it
+into deductive verification (2025). Postcondition **completeness** as a mutation-derived
+metric, and the output-perturbation check ("does the postcondition accept an incorrect
+output"), are an active area: POSTCONDBENCH (2026), completeness-lemma / perturbation work,
+and related specification-completeness research.
 
-What is here is that mechanised for Rust contracts, where the
-[std-contracts project goal](https://rust-lang.github.io/rust-project-goals/2025h1/std-contracts.html)
-states safety conditions already live in documentation and is moving them into programmatic
-contracts, and describes no mechanism for checking whether a ported contract preserved
-anything.
+What is here is those checks mechanised for Rust/Kani contracts, which ship none of them,
+where the [std-contracts project goal](https://rust-lang.github.io/rust-project-goals/2025h1/std-contracts.html)
+is moving safety conditions from documentation into programmatic contracts and describes no
+mechanism for checking whether a ported contract is either empty or too loose.
 
 ## Licence
 

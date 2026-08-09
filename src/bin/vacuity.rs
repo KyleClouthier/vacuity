@@ -30,6 +30,10 @@ USAGE:
     vacuity <path> --preconditions   probe #[requires] instead of #[ensures]:
                                      a cover that comes back UNREACHABLE means the
                                      preconditions are unsatisfiable (vacuous)
+    vacuity <path> --completeness    probe whether the postcondition is LOOSE:
+                                     a SATISFIED cover means a wrong output still
+                                     satisfies the contract (an output-changing
+                                     mutant survives it); UNREACHABLE means tight
 
 WORKFLOW:
     vacuity ./src --out probes.rs
@@ -61,14 +65,18 @@ fn main() {
         .unwrap_or_else(|| ".".into());
 
     let preconditions = args.iter().any(|a| a == "--preconditions");
-    let rep = if preconditions {
+    let completeness = args.iter().any(|a| a == "--completeness");
+    let rep = if completeness {
+        vacuity::probe::generate_completeness(Path::new(&path))
+    } else if preconditions {
         vacuity::probe::generate_preconditions(Path::new(&path))
     } else {
         vacuity::probe::generate(Path::new(&path))
     };
 
     eprintln!("  {} found : {}",
-        if preconditions { "precondition clauses" } else { "postconditions" }, rep.clauses_seen);
+        if completeness { "postconditions (completeness)" }
+        else if preconditions { "precondition clauses" } else { "postconditions" }, rep.clauses_seen);
     eprintln!("  probes generated     : {}", rep.probes.len());
     eprintln!("  skipped              : {}", rep.skips.len());
     if !rep.arbitrary_types.is_empty() {
@@ -101,7 +109,11 @@ fn main() {
         let missing: Vec<_> = mapped.iter().filter(|(_, v)| v.is_none()).collect();
 
         if !vacuous.is_empty() {
-            if preconditions {
+            if completeness {
+                println!("\n  {} contracts are LOOSE (incomplete).", vacuous.len());
+                println!("  A return value the implementation never produces still satisfies the");
+                println!("  postcondition, so an output-changing implementation survives it.\n");
+            } else if preconditions {
                 println!("\n  {} functions have VACUOUS PRECONDITIONS.", vacuous.len());
                 println!("  Their #[requires] clauses are jointly unsatisfiable, so no input");
                 println!("  reaches the body and every proof under them checks nothing.\n");
@@ -113,6 +125,8 @@ fn main() {
             for (p, _) in &vacuous {
                 println!("    {}:{}  {}", p.file.display(), p.line, p.func);
             }
+        } else if completeness {
+            println!("\n  No loose contract found: every contract uniquely pins its output.");
         } else {
             println!("\n  No clause was proven vacuous.");
         }
@@ -128,7 +142,7 @@ fn main() {
     }
 
     let std_mode = args.iter().any(|a| a == "--std");
-    let module = vacuity::probe::render_module(&rep, std_mode, preconditions);
+    let module = vacuity::probe::render_module(&rep, std_mode, preconditions, completeness);
     match flag("--out") {
         Some(f) => {
             if let Err(e) = std::fs::write(&f, &module) {

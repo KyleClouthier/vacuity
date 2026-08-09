@@ -196,6 +196,11 @@ struct Ctx<'a> {
     /// instead of postconditions. Precondition vacuity is return-type-independent
     /// and is the `assume(false)` gap the Kani paper flags as manual review.
     precond: bool,
+    /// When true, probe COMPLETENESS: does the postcondition accept a return value
+    /// OTHER than the one the implementation produces? A satisfiable cover means the
+    /// contract is loose (some wrong output survives it). This is the one-query
+    /// decision form of mutation adequacy (POSTCONDBENCH-style completeness).
+    completeness: bool,
 }
 
 fn ensures_clauses(attrs: &[syn::Attribute]) -> Vec<String> {
@@ -338,6 +343,10 @@ fn build(
     self_ty: Option<&syn::Type>,
     ctx: &mut Ctx,
 ) {
+    if ctx.completeness {
+        build_completeness(attrs, sig, self_ty, ctx);
+        return;
+    }
     if ctx.precond {
         build_precondition(attrs, sig, self_ty, ctx);
         return;
@@ -448,6 +457,132 @@ fn build(
     }
 }
 
+/// Completeness (one-query mutation adequacy): call the real function to get the
+/// correct output, havoc a DIFFERENT output, and cover the postcondition on it.
+/// A SATISFIED cover means a wrong output satisfies the contract, so some
+/// output-changing implementation survives it and the contract is loose. An
+/// UNREACHABLE cover means only the true output passes: the contract is tight.
+/// Requires the return type to be probeable AND `PartialEq` (for `wrong != correct`).
+fn build_completeness(
+    attrs: &[syn::Attribute],
+    sig: &syn::Signature,
+    self_ty: Option<&syn::Type>,
+    ctx: &mut Ctx,
+) {
+    let clauses = ensures_clauses(attrs);
+    if clauses.is_empty() {
+        return;
+    }
+    let fname = sig.ident.to_string();
+    ctx.rep.clauses_seen += clauses.len();
+    let mut fail = |why: String, ctx: &mut Ctx| {
+        ctx.rep.skips.push(Skip { file: ctx.file.to_path_buf(), func: fname.clone(), reason: why });
+    };
+    if sig.generics.params.iter().any(|p| matches!(p, syn::GenericParam::Type(_))) {
+        fail("generic function, no type arguments to instantiate".into(), ctx);
+        return;
+    }
+    let ret = match &sig.output {
+        syn::ReturnType::Type(_, t) => match (head(t).as_deref(), self_ty) {
+            (Some("Self"), Some(st)) => st.clone(),
+            _ => (**t).clone(),
+        },
+        syn::ReturnType::Default => {
+            fail("returns unit, so there is no result to constrain".into(), ctx);
+            return;
+        }
+    };
+    if let Err(e) = probeable(&ret, ctx.known) {
+        fail(format!("return type: {e}"), ctx);
+        return;
+    }
+
+    let mut binds = Vec::new();
+    let mut args: Vec<String> = Vec::new();
+    let mut is_method = false;
+    for a in &sig.inputs {
+        match a {
+            syn::FnArg::Receiver(_) => {
+                let Some(st) = self_ty else {
+                    fail("takes self but is not in an impl block".into(), ctx);
+                    return;
+                };
+                if let Err(e) = probeable(st, ctx.known) {
+                    fail(format!("self type: {e}"), ctx);
+                    return;
+                }
+                binds.push(format!("let probe_self: {} = kani::any();", tokens(st)));
+                is_method = true;
+            }
+            syn::FnArg::Typed(t) => {
+                if let Err(e) = probeable(&t.ty, ctx.known) {
+                    fail(format!("parameter: {e}"), ctx);
+                    return;
+                }
+                let syn::Pat::Ident(id) = &*t.pat else {
+                    fail("parameter is a pattern, not a plain name".into(), ctx);
+                    return;
+                };
+                binds.push(format!("let {}: {} = kani::any();", id.ident, tokens(&t.ty)));
+                args.push(id.ident.to_string());
+            }
+        }
+    }
+
+    // Conjunction of all ensures clauses, each with its result binding pointed at the
+    // havoc'd wrong output.
+    let mut result_binds = Vec::new();
+    let mut bodies = Vec::new();
+    for (i, raw) in clauses.iter().enumerate() {
+        let Ok(closure) = syn::parse_str::<syn::ExprClosure>(raw) else {
+            fail(format!("clause {i} is not a closure this tool can parse"), ctx);
+            return;
+        };
+        let Some(syn::Pat::Ident(bind)) = closure.inputs.first().map(strip_type) else {
+            fail(format!("clause {i} has no simple result binding"), ctx);
+            return;
+        };
+        let body = rename_word(&tokens(&*closure.body), "self", "probe_self");
+        result_binds.push(format!("let {} = &probe_wrong;", bind.ident));
+        bodies.push(format!("({body})"));
+    }
+    if bodies.is_empty() {
+        return;
+    }
+
+    let call = if is_method {
+        format!("probe_self.{}({})", fname, args.join(", "))
+    } else {
+        format!("{}({})", fname, args.join(", "))
+    };
+    ctx.seq += 1;
+    let name = format!("probe_complete_{}_{}", fname, ctx.seq);
+    let rt = tokens(&ret);
+    let code = format!(
+        "    /// Probes `{fname}` completeness. A SATISFIED cover means a WRONG output\n\
+         \x20   /// satisfies the contract, so it does not pin the result (loose contract).\n\
+         \x20   #[kani::proof]\n\
+         \x20   fn {name}() {{\n\
+         \x20       {binds}\n\
+         \x20       let probe_correct: {rt} = {call};\n\
+         \x20       let probe_wrong: {rt} = kani::any();\n\
+         \x20       kani::assume(probe_wrong != probe_correct);\n\
+         \x20       {result_binds}\n\
+         \x20       kani::cover!({conj}, \"a wrong output satisfies the contract\");\n\
+         \x20   }}\n",
+        binds = binds.join("\n        "),
+        result_binds = result_binds.join("\n        "),
+        conj = bodies.join(" && "),
+    );
+    ctx.rep.probes.push(Probe {
+        file: ctx.file.to_path_buf(),
+        line: sig.ident.span().start().line,
+        func: fname.clone(),
+        name,
+    code,
+    });
+}
+
 fn strip_type(p: &syn::Pat) -> syn::Pat {
     match p {
         syn::Pat::Type(t) => (*t.pat).clone(),
@@ -509,16 +644,22 @@ fn rust_files(root: &Path) -> Vec<PathBuf> {
 /// Probe postconditions (`#[ensures]`): does a clause hold for every value its
 /// return type admits, proving nothing.
 pub fn generate(root: &Path) -> ProbeReport {
-    generate_impl(root, false)
+    generate_impl(root, false, false)
 }
 
 /// Probe preconditions (`#[requires]`): are the assumptions jointly satisfiable,
 /// or is every proof under them vacuous. Return-type-independent.
 pub fn generate_preconditions(root: &Path) -> ProbeReport {
-    generate_impl(root, true)
+    generate_impl(root, true, false)
 }
 
-fn generate_impl(root: &Path, precond: bool) -> ProbeReport {
+/// Probe completeness: does the postcondition accept an output the implementation
+/// never produces (loose), or does it uniquely pin the result (tight)?
+pub fn generate_completeness(root: &Path) -> ProbeReport {
+    generate_impl(root, false, true)
+}
+
+fn generate_impl(root: &Path, precond: bool, completeness: bool) -> ProbeReport {
     let mut rep = ProbeReport::default();
     let mut known = HashSet::new();
     let files = rust_files(root);
@@ -540,7 +681,7 @@ fn generate_impl(root: &Path, precond: bool) -> ProbeReport {
     for p in &files {
         let Ok(src) = std::fs::read_to_string(p) else { continue };
         let Ok(f) = syn::parse_file(&src) else { continue };
-        let mut ctx = Ctx { file: p, known: &known, rep: &mut rep, seq, precond };
+        let mut ctx = Ctx { file: p, known: &known, rep: &mut rep, seq, precond, completeness };
         walk(&f.items, None, &mut ctx);
         seq = ctx.seq;
     }
@@ -778,20 +919,38 @@ pub fn interpret<'a>(rep: &'a ProbeReport, kani_output: &str) -> Vec<(&'a Probe,
         let mut verdict = None;
         let mut idx = 0;
         let is_precond = p.name.starts_with("probe_precond_");
+        let is_complete = p.name.starts_with("probe_complete_");
         while let Some(rel) = kani_output[idx..].find(&p.name) {
             let at = idx + rel;
             let tail = &kani_output[at + p.name.len()..];
             let stop = tail.find("Checking harness").unwrap_or(tail.len());
             let window = &tail[..stop];
+            // Match the per-check STATUS line, not the bare word: the summary line
+            // "0 of 1 cover properties satisfied" contains "satisfied" and would
+            // otherwise misread an unsatisfiable cover. Kani reports a cover as
+            // "Status: SATISFIED" (fired) or "Status: UNSATISFIABLE" / "Status:
+            // UNREACHABLE" (never fires).
+            let cover_fired = window.contains("Status: SATISFIED");
+            let cover_dead = window.contains("Status: UNSATISFIABLE") || window.contains("Status: UNREACHABLE");
             if is_precond {
-                // A precondition probe ALWAYS reports VERIFICATION:- SUCCESSFUL (an
-                // unsatisfiable assume set is the paper's vacuous pass). The real signal
-                // is the cover status: UNREACHABLE => preconditions unsatisfiable => vacuous.
-                if window.contains("UNREACHABLE") || window.contains("unreachable") {
+                // cover!(true) after the assumes: UNREACHABLE => preconditions
+                // unsatisfiable => vacuous. SATISFIED => reachable => healthy.
+                if cover_dead {
                     verdict = Some(true);
                     break;
                 }
-                if window.contains("SATISFIED") || window.contains("satisfied") {
+                if cover_fired {
+                    verdict = Some(false);
+                    break;
+                }
+            } else if is_complete {
+                // SATISFIED => a wrong output satisfies the contract => LOOSE (the finding).
+                // UNSATISFIABLE/UNREACHABLE => only the true output passes => tight.
+                if cover_fired {
+                    verdict = Some(true);
+                    break;
+                }
+                if cover_dead {
                     verdict = Some(false);
                     break;
                 }
@@ -818,9 +977,17 @@ pub fn interpret<'a>(rep: &'a ProbeReport, kani_output: &str) -> Vec<(&'a Probe,
 /// Rust standard library requires on every new item but which does NOT compile
 /// in an ordinary crate. Default (false) omits it so the probes build in any
 /// crate; pass `--std` when pasting into verify-rust-std.
-pub fn render_module(rep: &ProbeReport, std_mode: bool, precond: bool) -> String {
+pub fn render_module(rep: &ProbeReport, std_mode: bool, precond: bool, completeness: bool) -> String {
     let mut s = String::new();
-    if precond {
+    if completeness {
+        s.push_str(
+            "// GENERATED COMPLETENESS PROBES. Each havocs the inputs, calls the real function\n\
+             // for the correct output, havocs a DIFFERENT output, and covers the postcondition\n\
+             // on it. A SATISFIED cover means a WRONG output satisfies the contract, so the\n\
+             // contract is LOOSE (an output-changing mutant survives it). An UNREACHABLE cover\n\
+             // means only the true output passes: the contract is tight.\n",
+        );
+    } else if precond {
         s.push_str(
             "// GENERATED PRECONDITION PROBES. Each havocs the inputs, assumes every\n\
              // #[requires] clause, then covers reachability. AN UNREACHABLE COVER MEANS THE\n\
