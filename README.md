@@ -1,6 +1,6 @@
 # vacuity
 
-**Paper:** [Passing Proofs That Prove Nothing](https://doi.org/10.5281/zenodo.21865171) (DOI 10.5281/zenodo.21865171, CC BY 4.0).
+**Paper:** [Passing Proofs That Prove Nothing](https://doi.org/10.5281/zenodo.21865170) (DOI 10.5281/zenodo.21865170, CC BY 4.0).
 
 Some postconditions prove nothing at all.
 
