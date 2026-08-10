@@ -5,6 +5,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Finds postconditions that prove nothing: generates a Kani harness per clause that decides vacuity in one query."
 readme = "README.md"
+repository = "https://github.com/KyleClouthier/vacuity"
 keywords = ["verification", "kani", "contracts", "formal-methods", "vacuity"]
 categories = ["development-tools"]
 

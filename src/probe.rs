@@ -251,7 +251,7 @@ fn build_precondition(
     }
     let fname = sig.ident.to_string();
     ctx.rep.clauses_seen += clauses.len();
-    let mut fail = |why: String, ctx: &mut Ctx| {
+    let fail = |why: String, ctx: &mut Ctx| {
         ctx.rep.skips.push(Skip { file: ctx.file.to_path_buf(), func: fname.clone(), reason: why });
     };
 
@@ -365,7 +365,7 @@ fn build(
     let fname = sig.ident.to_string();
     ctx.rep.clauses_seen += clauses.len();
 
-    let mut fail = |why: String, ctx: &mut Ctx| {
+    let fail = |why: String, ctx: &mut Ctx| {
         ctx.rep.skips.push(Skip { file: ctx.file.to_path_buf(), func: fname.clone(), reason: why });
     };
 
@@ -484,7 +484,7 @@ fn build_completeness(
     }
     let fname = sig.ident.to_string();
     ctx.rep.clauses_seen += clauses.len();
-    let mut fail = |why: String, ctx: &mut Ctx| {
+    let fail = |why: String, ctx: &mut Ctx| {
         ctx.rep.skips.push(Skip { file: ctx.file.to_path_buf(), func: fname.clone(), reason: why });
     };
     if sig.generics.params.iter().any(|p| matches!(p, syn::GenericParam::Type(_))) {
